@@ -18,6 +18,7 @@ package io.moquette.broker;
 import io.moquette.broker.subscriptions.Topic;
 import io.moquette.broker.security.IAuthenticator;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufHolder;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
@@ -37,6 +38,7 @@ import static io.netty.channel.ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE;
 import static io.netty.handler.codec.mqtt.MqttConnectReturnCode.*;
 import static io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader.from;
 import static io.netty.handler.codec.mqtt.MqttQoS.*;
+import io.netty.util.ReferenceCountUtil;
 
 final class MQTTConnection {
 
@@ -359,8 +361,6 @@ final class MQTTConnection {
         final String clientId = getClientId();
         final int messageID = msg.variableHeader().packetId();
         LOG.trace("Processing PUBLISH message, topic: {}, messageId: {}, qos: {}", topicName, messageID, qos);
-        ByteBuf payload = msg.payload();
-        final boolean retain = msg.fixedHeader().isRetain();
         final Topic topic = new Topic(topicName);
         if (!topic.isValid()) {
             LOG.debug("Drop connection because of invalid topic format");
@@ -368,16 +368,15 @@ final class MQTTConnection {
         }
         switch (qos) {
             case AT_MOST_ONCE:
-                postOffice.receivedPublishQos0(topic, username, clientId, payload, retain, msg);
+                postOffice.receivedPublishQos0(topic, username, clientId, msg);
                 break;
             case AT_LEAST_ONCE: {
-                postOffice.receivedPublishQos1(this, topic, username, payload, messageID, retain, msg);
+                postOffice.receivedPublishQos1(this, topic, username, messageID, msg);
                 break;
             }
             case EXACTLY_ONCE: {
                 bindedSession.receivedPublishQos2(messageID, msg);
                 postOffice.receivedPublishQos2(this, msg, username);
-//                msg.release();
                 break;
             }
             default:
@@ -419,11 +418,19 @@ final class MQTTConnection {
             LOG.debug("OUT {}", msg.fixedHeader().messageType());
         }
         if (channel.isWritable()) {
+
+            // Sending to external, retain a duplicate. Just retain is not
+            // enough, since the receiver must have full control.
+            Object retainedDup = msg;
+            if (msg instanceof ByteBufHolder) {
+                retainedDup = ((ByteBufHolder) msg).retainedDuplicate();
+            }
+
             ChannelFuture channelFuture;
             if (brokerConfig.isImmediateBufferFlush()) {
-                channelFuture = channel.writeAndFlush(msg);
+                channelFuture = channel.writeAndFlush(retainedDup);
             } else {
-                channelFuture = channel.write(msg);
+                channelFuture = channel.write(retainedDup);
             }
             channelFuture.addListener(FIRE_EXCEPTION_ON_FAILURE);
         }
@@ -437,7 +444,7 @@ final class MQTTConnection {
     }
 
     void sendPubAck(int messageID) {
-        LOG.trace("sendPubAck invoked");
+        LOG.trace("sendPubAck for messageID: {}", messageID);
         MqttFixedHeader fixedHeader = new MqttFixedHeader(MqttMessageType.PUBACK, false, AT_MOST_ONCE,
                                                   false, 0);
         MqttPubAckMessage pubAckMessage = new MqttPubAckMessage(fixedHeader, from(messageID));
@@ -503,7 +510,7 @@ final class MQTTConnection {
     }
 
     int nextPacketId() {
-        return lastPacketId.incrementAndGet();
+        return lastPacketId.updateAndGet(v -> v == 65535 ? 1 : v + 1);
     }
 
     @Override
@@ -521,5 +528,9 @@ final class MQTTConnection {
             // TODO drain all messages in target's session in-flight message queue
             bindedSession.flushAllQueuedMessages();
         }
+    }
+
+    public void flush() {
+        channel.flush();
     }
 }

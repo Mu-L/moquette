@@ -111,6 +111,8 @@ class PostOffice {
 
                 final ByteBuf payloadBuf = Unpooled.wrappedBuffer(retainedMsg.getPayload());
                 targetSession.sendRetainedPublishOnSessionAtQos(retainedMsg.getTopic(), qos, payloadBuf);
+                // We made the buffer, we must release it.
+                payloadBuf.release();
             }
         }
     }
@@ -156,15 +158,14 @@ class PostOffice {
         mqttConnection.sendUnsubAckMessage(topics, clientID, messageId);
     }
 
-    void receivedPublishQos0(Topic topic, String username, String clientID, ByteBuf payload, boolean retain,
-                             MqttPublishMessage msg) {
+    void receivedPublishQos0(Topic topic, String username, String clientID, MqttPublishMessage msg) {
         if (!authorizator.canWrite(topic, username, clientID)) {
             LOG.error("client is not authorized to publish on topic: {}", topic);
             return;
         }
-        publish2Subscribers(payload, topic, AT_MOST_ONCE);
+        publish2Subscribers(msg.payload(), topic, AT_MOST_ONCE);
 
-        if (retain) {
+        if (msg.fixedHeader().isRetain()) {
             // QoS == 0 && retain => clean old retained
             retainedRepository.cleanRetained(topic);
         }
@@ -172,8 +173,8 @@ class PostOffice {
         interceptor.notifyTopicPublished(msg, clientID, username);
     }
 
-    void receivedPublishQos1(MQTTConnection connection, Topic topic, String username, ByteBuf payload, int messageID,
-                             boolean retain, MqttPublishMessage msg) {
+    void receivedPublishQos1(MQTTConnection connection, Topic topic, String username, int messageID,
+                             MqttPublishMessage msg) {
         // verify if topic can be write
         topic.getTokens();
         if (!topic.isValid()) {
@@ -187,11 +188,12 @@ class PostOffice {
             return;
         }
 
+        ByteBuf payload = msg.payload();
         publish2Subscribers(payload, topic, AT_LEAST_ONCE);
 
         connection.sendPubAck(messageID);
 
-        if (retain) {
+        if (msg.fixedHeader().isRetain()) {
             if (!payload.isReadable()) {
                 retainedRepository.cleanRetained(topic);
             } else {
@@ -202,7 +204,7 @@ class PostOffice {
         interceptor.notifyTopicPublished(msg, clientId, username);
     }
 
-    private void publish2Subscribers(ByteBuf origPayload, Topic topic, MqttQoS publishingQos) {
+    private void publish2Subscribers(ByteBuf payload, Topic topic, MqttQoS publishingQos) {
         Set<Subscription> topicMatchingSubscriptions = subscriptions.matchQosSharpening(topic);
 
         for (final Subscription sub : topicMatchingSubscriptions) {
@@ -213,8 +215,6 @@ class PostOffice {
             if (isSessionPresent) {
                 LOG.debug("Sending PUBLISH message to active subscriber CId: {}, topicFilter: {}, qos: {}",
                           sub.getClientId(), sub.getTopicFilter(), qos);
-                // we need to retain because duplicate only copy r/w indexes and don't retain() causing refCnt = 0
-                ByteBuf payload = origPayload.retainedDuplicate();
                 targetSession.sendPublishOnSessionAtQos(topic, qos, payload);
             } else {
                 // If we are, the subscriber disconnected after the subscriptions tree selected that session as a
@@ -284,7 +284,7 @@ class PostOffice {
         if (!msg.fixedHeader().isRetain()) {
             return;
         }
-        if (qos == AT_MOST_ONCE || msg.payload().readableBytes() == 0) {
+        if (qos == AT_MOST_ONCE || payload.readableBytes() == 0) {
             // QoS == 0 && retain => clean old retained
             retainedRepository.cleanRetained(topic);
             return;

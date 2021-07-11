@@ -77,7 +77,7 @@ public final class BrokerInterceptor implements Interceptor {
     /**
      * Shutdown graciously the executor service
      */
-    void stop() {
+    public void stop() {
         LOG.info("Shutting down interceptor thread pool...");
         executor.shutdown();
         try {
@@ -130,7 +130,8 @@ public final class BrokerInterceptor implements Interceptor {
                     for (InterceptHandler handler : handlers.get(InterceptPublishMessage.class)) {
                         LOG.debug("Notifying MQTT PUBLISH message to interceptor. CId={}, messageId={}, topic={}, "
                                 + "interceptorId={}", clientID, messageId, topic, handler.getID());
-                        handler.onPublish(new InterceptPublishMessage(msg, clientID, username));
+                        // Sending to the outside, make a retainedDuplicate.
+                        handler.onPublish(new InterceptPublishMessage(msg.retainedDuplicate(), clientID, username));
                     }
                 } finally {
                     ReferenceCountUtil.release(msg);
